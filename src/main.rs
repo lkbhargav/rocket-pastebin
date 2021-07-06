@@ -58,7 +58,7 @@ fn rocket() -> _ {
 
     let thread_schedule_handle = scheduler.watch_thread(Duration::from_secs(1));
 
-    let uid = UniqueID::new(3_999_606_208, 0.01, 6);
+    let uid = UniqueID::new(1_606_208, 0.01, 4);
     rocket::build()
         .mount("/", routes![index, upload, retrieve])
         .attach(uid)
