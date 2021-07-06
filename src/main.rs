@@ -31,7 +31,7 @@ fn index() -> &'static str {
 #[post("/", data = "<paste>")]
 async fn upload(paste: Data<'_>, id: UploadRequestGuard) -> Result<String, Debug<std::io::Error>> {
     let filename = format!("upload/{}", id.0);
-    let url = format!("{host}/{id}\n", host = "http://localhost:8000", id = id.0);
+    let url = format!("{host}/{id}\n", host = "https://p.bl5.me", id = id.0);
     paste.open(128.kibibytes()).into_file(filename).await?;
     util::add_id_to_file_for_deletion(id.0, 1).await.unwrap();
     Ok(url)
