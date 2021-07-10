@@ -5,25 +5,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::prelude::*;
 use std::path::Path;
 
-// #[derive(Debug)]
-// enum UtilErrors {
-//   NegativeNumberUnexpectedAsInput,
-// }
-
-// impl Error for UtilErrors {}
-
-// impl Display for UtilErrors {
-//   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//     return match self {
-//       UtilErrors::NegativeNumberUnexpectedAsInput => write!(
-//         f,
-//         "{}: expected a positive integer for input, rather found a negative integer",
-//         self::UtilErrors::NegativeNumberUnexpectedAsInput
-//       ),
-//     };
-//   }
-// }
-
 pub async fn add_id_to_file_for_deletion(
   id: String,
   days_to_delete_after: i32,
@@ -76,9 +57,12 @@ pub fn delete_pastes_from_deletions(file_path: &str) {
 
     for line in contents.lines() {
       let filename = format!("upload/{}", line);
-      // remove individual paste file
-      fs::remove_file(filename).unwrap();
-      total_pastes_deleted += 1;
+
+      if Path::new(&filename).exists() {
+        // remove individual paste file
+        fs::remove_file(filename).unwrap();
+        total_pastes_deleted += 1;
+      }
     }
     // removing the deletions file
     fs::remove_file(&file_path).unwrap();

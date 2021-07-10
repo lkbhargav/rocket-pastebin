@@ -2,15 +2,59 @@
 extern crate rocket;
 
 use clokwerk::{Scheduler, TimeUnits};
+use r_cache::cache::Cache;
 use rocket::data::ToByteUnit;
-use rocket::response::Debug;
+use rocket::http::Status;
 use rocket::tokio::fs::File;
-use rocket::Data;
-use rocket_pastebin::fairings::UniqueID;
-use rocket_pastebin::param_guards::ID;
+use rocket::{Data, State};
+use rocket_pastebin::core::{self, Record};
+use rocket_pastebin::fairings::{CacheCounter, UniqueID};
+use rocket_pastebin::param_guards::{TimeParam, ID};
 use rocket_pastebin::request_guards::UploadRequestGuard;
-use rocket_pastebin::util;
+use rocket_pastebin::CustomConfig;
 use std::time::Duration;
+
+async fn abstracted_upload_functionality(
+    upload_request: UploadRequestGuard,
+    custom_config: &CustomConfig,
+    paste: Data<'_>,
+    cache: &State<Cache<String, String>>,
+    expiry_in_seconds: u64,
+) -> (Status, String) {
+    let filename = format!("upload/{}", upload_request.id);
+    let url = format!(
+        "{host}/{id}",
+        host = custom_config.exposable_url,
+        id = upload_request.id
+    );
+    let val = paste.open(128.kibibytes()).into_file(filename).await;
+
+    if val.is_err() {
+        return (Status::BadRequest, val.unwrap_err().to_string());
+    }
+
+    cache
+        .set(
+            upload_request.id.clone(),
+            "".to_string(),
+            Some(Duration::from_secs(expiry_in_seconds)),
+        )
+        .await;
+
+    let record = Record::new(upload_request.id, expiry_in_seconds);
+    let log_resp = record.log_to_particular_day(&Record::get_deletions_date_for_number_of_days(
+        expiry_in_seconds as i64,
+    ));
+
+    if log_resp.is_err() {
+        return (
+            Status::InternalServerError,
+            log_resp.unwrap_err().to_string(),
+        );
+    }
+
+    (Status::Ok, url)
+}
 
 #[get("/")]
 fn index() -> &'static str {
@@ -29,28 +73,128 @@ fn index() -> &'static str {
 }
 
 #[post("/", data = "<paste>")]
-async fn upload(paste: Data<'_>, id: UploadRequestGuard) -> Result<String, Debug<std::io::Error>> {
-    let filename = format!("upload/{}", id.0);
-    let url = format!("{host}/{id}\n", host = "https://p.bl5.me", id = id.0);
-    paste.open(128.kibibytes()).into_file(filename).await?;
-    util::add_id_to_file_for_deletion(id.0, 1).await.unwrap();
-    Ok(url)
+async fn upload(
+    paste: Data<'_>,
+    upload_request: UploadRequestGuard,
+    cache: &State<Cache<String, String>>,
+    custom_config: &State<CustomConfig>,
+) -> (Status, String) {
+    abstracted_upload_functionality(
+        upload_request,
+        custom_config.inner(),
+        paste,
+        cache,
+        core::DEFAULT_EXPIRY,
+    )
+    .await
 }
 
 #[get("/<id>")]
-async fn retrieve(id: ID) -> Option<File> {
+async fn retrieve(id: ID, cache: &State<Cache<String, String>>) -> (Status, Option<File>) {
+    let val = cache.get(&id.0).await;
+
+    if val.is_none() {
+        return (Status::NotFound, None);
+    }
+
     let filename = format!("upload/{}", id.0);
-    File::open(&filename).await.ok()
+    (Status::Ok, File::open(&filename).await.ok())
+}
+
+#[post("/<time>", data = "<paste>")]
+async fn custom_upload(
+    time: TimeParam,
+    upload_request: UploadRequestGuard,
+    cache: &State<Cache<String, String>>,
+    custom_config: &State<CustomConfig>,
+    paste: Data<'_>,
+) -> (Status, String) {
+    if time.error != "" {
+        return (Status::BadRequest, time.error);
+    }
+
+    abstracted_upload_functionality(
+        upload_request,
+        custom_config.inner(),
+        paste,
+        cache,
+        time.duration.as_secs(),
+    )
+    .await
+
+    // let filename = format!("upload/{}", upload_request.id);
+    // let url = format!(
+    //     "{host}/{id}",
+    //     host = custom_config.exposable_url,
+    //     id = upload_request.id
+    // );
+    // let val = paste.open(128.kibibytes()).into_file(filename).await;
+
+    // if val.is_err() {
+    //     return (Status::BadRequest, val.unwrap_err().to_string());
+    // }
+
+    // cache
+    //     .set(
+    //         upload_request.id.clone(),
+    //         "".to_string(),
+    //         Some(time.duration),
+    //     )
+    //     .await;
+
+    // let record = Record::new(upload_request.id, time.duration.as_secs());
+    // let log_resp = record.log_to_particular_day(&time.deletion_date);
+
+    // if log_resp.is_err() {
+    //     return (
+    //         Status::InternalServerError,
+    //         log_resp.unwrap_err().to_string(),
+    //     );
+    // }
+
+    // (Status::Ok, url)
 }
 
 #[launch]
-fn rocket() -> _ {
+async fn rocket() -> _ {
     let mut scheduler = Scheduler::new();
+    let cache = Cache::<String, String>::new(Some(Duration::from_secs(2 * 60 * 60)));
 
-    scheduler
-        .every(1.day())
-        .at("2:00 am")
-        .run(|| util::delete_pastes_from_deletions(""));
+    // let cache = CacheHolder::new();
+
+    let custom_config = CustomConfig::new();
+
+    // for key in vec!["iMBGfX7", "IHTXPQ1"] {
+    //     let r = Record::new(key.to_string(), core::DEFAULT_EXPIRY);
+    //     let res = r.log_to_particular_day("2021-08-06");
+
+    //     if res.is_err() {
+    //         println!(
+    //             "Error while trying to log to a particular day. Error: {}",
+    //             res.unwrap_err()
+    //         );
+    //     }
+    // }
+
+    // let val = Record::delete_all_records_from_the_deletions_and_itself("2021-07-11");
+
+    // if val.is_err() {
+    //     println!("Error while deleting records: {:?}", val.unwrap_err());
+    // }
+
+    // thread::sleep(Duration::from_secs(5));
+
+    // let cache_copy = &cache;
+
+    scheduler.every(1.day()).at("2:00 am").run(|| {
+        let val = Record::delete_all_records_from_the_deletions_and_itself(
+            &Record::get_deletions_date_for_number_of_days(-(86_400 * 7)),
+        );
+
+        if val.is_err() {
+            println!("Error while running a cron job to delete previous 7th day deletions file. Actual error: {}", val.unwrap_err());
+        }
+    });
 
     // scheduler
     //     .every(1.seconds())
@@ -59,8 +203,12 @@ fn rocket() -> _ {
     let thread_schedule_handle = scheduler.watch_thread(Duration::from_secs(1));
 
     let uid = UniqueID::new(1_606_208, 0.01, 4);
+    let cache_counter = CacheCounter::new();
     rocket::build()
-        .mount("/", routes![index, upload, retrieve])
+        .mount("/", routes![index, upload, retrieve, custom_upload])
         .attach(uid)
+        .attach(cache_counter)
         .manage(thread_schedule_handle)
+        .manage(cache)
+        .manage(custom_config)
 }

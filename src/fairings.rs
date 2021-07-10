@@ -6,11 +6,10 @@ use bloom::BloomFilter;
 use chrono::NaiveDate;
 use chrono::Utc;
 use rand::{self, Rng};
-use rocket::{
-  fairing::{Fairing, Info, Kind},
-  http::{Header, Method},
-};
+use rocket::fairing::{Fairing, Info, Kind};
+use rocket::http::{Header, Method};
 use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const BASE62: &'static [u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
@@ -60,7 +59,7 @@ impl UniqueID {
 
 #[rocket::async_trait]
 impl Fairing for UniqueID {
-  fn info(&self) -> rocket::fairing::Info {
+  fn info(&self) -> Info {
     Info {
       name: "Unique ID",
       kind: Kind::Liftoff | Kind::Request,
@@ -78,7 +77,7 @@ impl Fairing for UniqueID {
   async fn on_request(&self, req: &mut rocket::Request<'_>, _data: &mut rocket::Data<'_>) {
     if req.method() == Method::Post {
       let mut id;
-      // loop through all the available entries until id is unique
+      // looping through random ids until a non used unique id is found
       loop {
         id = self.generate_id();
         if !self.bloom_instance.contains(&id) {
@@ -101,6 +100,51 @@ impl Fairing for UniqueID {
               println!("Key ({}) not found!", id);
             }
           }
+        }
+      }
+    }
+  }
+}
+
+pub struct CacheCounter(pub AtomicUsize);
+
+const MAX_CACHE_KEYS_TO_RETAIN: usize = 500;
+
+impl CacheCounter {
+  pub fn new() -> Self {
+    CacheCounter(AtomicUsize::new(1))
+  }
+}
+
+#[rocket::async_trait]
+impl Fairing for CacheCounter {
+  fn info(&self) -> Info {
+    Info {
+      name: "Cache counter",
+      kind: Kind::Response,
+    }
+  }
+
+  async fn on_response<'r>(&self, _req: &'r rocket::Request<'_>, _res: &mut rocket::Response<'r>) {
+    // only on POST method, increment the CacheCounter value by 1.
+    if _req.method() == Method::Post {
+      self.0.fetch_add(1, Ordering::Relaxed);
+    }
+  }
+
+  async fn on_request(&self, _req: &mut rocket::Request<'_>, _data: &mut rocket::Data<'_>) {
+    if _req.method() == Method::Post {
+      if self.0.load(Ordering::Relaxed) == MAX_CACHE_KEYS_TO_RETAIN {
+        _req.add_header(Header::new("time-to-clear-expired-keys", "yes"));
+        let val = self
+          .0
+          .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| Some(x * 0));
+
+        if val.is_err() {
+          println!(
+            "error trying to reset the counter value to zero. Actual error: {}",
+            val.unwrap_err()
+          );
         }
       }
     }
