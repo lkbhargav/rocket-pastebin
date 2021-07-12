@@ -23,3 +23,20 @@ macro_rules! loop_through_files_in_dir {
     counter
   }};
 }
+
+#[macro_export]
+macro_rules! handle_err {
+  ($err:expr, $message:expr) => {
+    if $err.is_err() {
+      println!("{}. Error: {}", $message, $err.unwrap_err());
+      panic!($message);
+    }
+  };
+
+  ($err:expr, $message:expr, $custom_execution:block) => {
+    if $err.is_err() {
+      println!("{}. Error: {}", $message, $err.unwrap_err());
+      $custom_execution
+    }
+  };
+}

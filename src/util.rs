@@ -1,18 +1,21 @@
+use crate::core::Record;
+use crate::{handle_err, loop_through_files_in_dir};
+use chrono::NaiveDate;
 use chrono::{Duration, Utc};
+use r_cache::cache::Cache;
 use std::error::Error;
-// use std::fmt::{Debug, Display};
 use std::fs::{self, File, OpenOptions};
 use std::io::prelude::*;
+use std::io::BufReader;
 use std::path::Path;
+
+pub const SIMPLE_DATE_FORMAT: &str = "%Y-%m-%d";
 
 pub async fn add_id_to_file_for_deletion(
   id: String,
   days_to_delete_after: i32,
 ) -> Result<(), Box<dyn Error>> {
   let (file_path_with_name, _) = get_deletion_file_name_with_path(days_to_delete_after + 1);
-
-  // let opened_file = File::open(&file_path_with_name)
-  //   .unwrap_or_else(move |_: std::io::Error| File::open(file_path_with_name).unwrap());
 
   if !Path::new(&file_path_with_name).exists() {
     File::create(&file_path_with_name)?;
@@ -34,44 +37,10 @@ pub fn get_deletion_file_name_with_path(days_to_add: i32) -> (String, String) {
   (
     format!(
       "deletions/{file_name}.txt",
-      file_name = date.format("%Y-%m-%d")
+      file_name = date.format(SIMPLE_DATE_FORMAT)
     ),
-    date.format("%Y-%m-%d").to_string(),
+    date.format(SIMPLE_DATE_FORMAT).to_string(),
   )
-}
-
-pub fn delete_pastes_from_deletions(file_path: &str) {
-  let mut file_path = String::from(file_path);
-
-  if file_path == "" {
-    let (file_path_for_today, _) = get_deletion_file_name_with_path(0);
-    file_path = file_path_for_today;
-  }
-
-  if Path::new(&file_path).exists() {
-    let mut contents = String::new();
-    let mut file = std::fs::File::open(&file_path).unwrap();
-    file.read_to_string(&mut contents).unwrap();
-
-    let mut total_pastes_deleted: u32 = 0;
-
-    for line in contents.lines() {
-      let filename = format!("upload/{}", line);
-
-      if Path::new(&filename).exists() {
-        // remove individual paste file
-        fs::remove_file(filename).unwrap();
-        total_pastes_deleted += 1;
-      }
-    }
-    // removing the deletions file
-    fs::remove_file(&file_path).unwrap();
-
-    println!(
-      "Deleted {} file along with {} pastes!",
-      file_path, total_pastes_deleted
-    );
-  }
 }
 
 pub fn loop_through_files_in_directory<F>(directory_name: &str, callback: F) -> u32
@@ -87,4 +56,47 @@ where
   }
 
   counter
+}
+
+pub async fn populate_cache_on_first_run(cache: &Cache<String, String>) {
+  let today = Utc::now().naive_utc().date();
+  loop_through_files_in_dir!("deletions", filename, {
+    let date = filename.split(".").collect::<Vec<&str>>()[0];
+
+    let parse_resp = NaiveDate::parse_from_str(date, SIMPLE_DATE_FORMAT);
+    handle_err!(parse_resp, "trying to parse the date from the deletions", {
+    });
+
+    let date = parse_resp.unwrap();
+
+    if date.ge(&today) {
+      let file_resp = std::fs::File::open("deletions/".to_string() + &filename);
+      handle_err!(
+        file_resp.as_ref(),
+        format!(
+          "trying to open the qualifying deletions file ({})",
+          filename
+        ),
+        {}
+      );
+
+      let reader = BufReader::new(file_resp.unwrap());
+
+      for line in reader.lines() {
+        let r = Record::from(line.expect("Something is not right with this line"));
+
+        if !r.is_key_expired() {
+          cache
+            .set(
+              r.key.clone(),
+              "".to_string(),
+              Some(std::time::Duration::from_secs(
+                r.remaining_time_to_expiry() as u64
+              )),
+            )
+            .await;
+        }
+      }
+    }
+  });
 }

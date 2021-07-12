@@ -1,18 +1,18 @@
 use crate::util::get_deletion_file_name_with_path;
 use chrono::{self, Duration, Utc};
 use serde::{Deserialize, Serialize};
-// use std::convert::From::from;
 use std::error::Error;
 use std::fs::{self, File, OpenOptions};
 use std::io::prelude::*;
+use std::ops::{Add, Sub};
 use std::path::Path;
 use std::result::Result;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Record {
-  expiry: u64,
-  key: String,
-  created_time: String,
+  pub expiry: u64,
+  pub key: String,
+  pub created_time: String,
 }
 
 /// DEFAULT_EXPIRY = 604_800 => seconds for 1 week
@@ -117,7 +117,7 @@ impl Record {
       .checked_add_signed(Duration::days(days_to_add))
       .unwrap();
 
-    date.format("%Y-%m-%d").to_string()
+    date.format(crate::util::SIMPLE_DATE_FORMAT).to_string()
   }
 
   pub fn get_deletions_date_for_default_expiry() -> String {
@@ -126,6 +126,34 @@ impl Record {
 
   pub fn get_deletions_date_for_number_of_days(seconds_to_add: i64) -> String {
     Record::internal_get_deletions(seconds_to_add)
+  }
+
+  pub fn is_key_expired(&self) -> bool {
+    let timestamp = chrono::DateTime::parse_from_rfc2822(&self.created_time).unwrap();
+    let added = timestamp.add(Duration::seconds(self.expiry as i64));
+
+    let now = Utc::now();
+
+    if now.ge(&added) {
+      return true;
+    }
+
+    false
+  }
+
+  pub fn remaining_time_to_expiry(&self) -> i64 {
+    let created_timestamp = chrono::DateTime::parse_from_rfc2822(&self.created_time).unwrap();
+    let created_timestamp = created_timestamp.timestamp() + self.expiry as i64;
+
+    let current_timestamp = Utc::now().timestamp();
+
+    let difference = created_timestamp.sub(current_timestamp);
+
+    if difference <= 0 {
+      return 0;
+    }
+
+    difference
   }
 
   /// date => 2006-01-25
@@ -159,14 +187,24 @@ impl Record {
   }
 }
 
+impl From<String> for Record {
+  fn from(data: String) -> Self {
+    let conversion_resp = serde_json::from_str::<Record>(&data);
+
+    conversion_resp.expect("error trying to convert the given string to Record type")
+  }
+}
+
 #[cfg(test)]
 mod tests {
+  use std::thread;
+
   use super::*;
 
   #[test]
   fn test_for_deletions_date() {
     assert_eq!(
-      "2021-07-11",
+      "2021-07-13",
       Record::get_deletions_date_for_number_of_days(86400)
     );
   }
@@ -174,7 +212,7 @@ mod tests {
   #[test]
   fn test_for_deletions_date_2() {
     assert_eq!(
-      "2021-07-17",
+      "2021-07-19",
       Record::get_deletions_date_for_number_of_days(604_800)
     );
   }
@@ -182,7 +220,7 @@ mod tests {
   #[test]
   fn test_for_deletions_date_3() {
     assert_eq!(
-      "2021-07-13",
+      "2021-07-15",
       Record::get_deletions_date_for_number_of_days(259_200)
     );
   }
@@ -190,8 +228,55 @@ mod tests {
   #[test]
   fn test_for_deletions_date_4() {
     assert_eq!(
-      "2021-07-07",
+      "2021-07-09",
       Record::get_deletions_date_for_number_of_days(-259_200)
     );
+  }
+
+  #[test]
+  fn test_for_from_method() {
+    let data = String::from(r#"{"expiry": 15, "key": "u7F1", "created_time": "2021-07-11"}"#);
+    assert_eq!(15, Record::from(data).expiry);
+  }
+
+  #[test]
+  #[should_panic]
+  #[ignore]
+  fn test_for_from_method_2() {
+    let data = String::from(r#"{"expiry": 15, "key": 89, "created_time": "2021-07-11"}"#);
+    Record::from(data);
+  }
+
+  #[test]
+  fn test_is_key_expired() {
+    let r = Record::new("abcd".to_string(), 15);
+    assert!(!r.is_key_expired());
+  }
+
+  #[test]
+  fn test_is_key_expired_2() {
+    let r = Record::new("abcd".to_string(), 2);
+    assert!(!r.is_key_expired());
+    thread::sleep(std::time::Duration::from_secs(3));
+    assert!(r.is_key_expired());
+  }
+
+  #[test]
+  fn test_remaining_time_to_expiry() {
+    let r = Record::new("abcd".to_string(), 2);
+    assert_eq!(2, r.remaining_time_to_expiry());
+  }
+
+  #[test]
+  fn test_remaining_time_to_expiry_2() {
+    let r = Record::new("abcd".to_string(), 2);
+    thread::sleep(std::time::Duration::from_secs(2));
+    assert_eq!(0, r.remaining_time_to_expiry());
+  }
+
+  #[test]
+  fn test_remaining_time_to_expiry_3() {
+    let r = Record::new("abcd".to_string(), 30);
+    assert_eq!(30, r.remaining_time_to_expiry());
   }
 }

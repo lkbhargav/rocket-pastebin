@@ -8,10 +8,11 @@ use rocket::http::Status;
 use rocket::tokio::fs::File;
 use rocket::{Data, State};
 use rocket_pastebin::core::{self, Record};
-use rocket_pastebin::fairings::{CacheCounter, UniqueID};
+use rocket_pastebin::fairings::UniqueID;
 use rocket_pastebin::param_guards::{TimeParam, ID};
 use rocket_pastebin::request_guards::UploadRequestGuard;
 use rocket_pastebin::CustomConfig;
+use rocket_pastebin::{handle_err, util};
 use std::time::Duration;
 
 async fn abstracted_upload_functionality(
@@ -27,6 +28,11 @@ async fn abstracted_upload_functionality(
         host = custom_config.exposable_url,
         id = upload_request.id
     );
+
+    if upload_request.clear_expired_keys_from_cache {
+        cache.remove_expired().await;
+    }
+
     let val = paste.open(128.kibibytes()).into_file(filename).await;
 
     if val.is_err() {
@@ -121,38 +127,6 @@ async fn custom_upload(
         time.duration.as_secs(),
     )
     .await
-
-    // let filename = format!("upload/{}", upload_request.id);
-    // let url = format!(
-    //     "{host}/{id}",
-    //     host = custom_config.exposable_url,
-    //     id = upload_request.id
-    // );
-    // let val = paste.open(128.kibibytes()).into_file(filename).await;
-
-    // if val.is_err() {
-    //     return (Status::BadRequest, val.unwrap_err().to_string());
-    // }
-
-    // cache
-    //     .set(
-    //         upload_request.id.clone(),
-    //         "".to_string(),
-    //         Some(time.duration),
-    //     )
-    //     .await;
-
-    // let record = Record::new(upload_request.id, time.duration.as_secs());
-    // let log_resp = record.log_to_particular_day(&time.deletion_date);
-
-    // if log_resp.is_err() {
-    //     return (
-    //         Status::InternalServerError,
-    //         log_resp.unwrap_err().to_string(),
-    //     );
-    // }
-
-    // (Status::Ok, url)
 }
 
 #[launch]
@@ -160,40 +134,21 @@ async fn rocket() -> _ {
     let mut scheduler = Scheduler::new();
     let cache = Cache::<String, String>::new(Some(Duration::from_secs(2 * 60 * 60)));
 
-    // let cache = CacheHolder::new();
+    // populating the cache from the saved pastes
+    util::populate_cache_on_first_run(&cache).await;
 
     let custom_config = CustomConfig::new();
 
-    // for key in vec!["iMBGfX7", "IHTXPQ1"] {
-    //     let r = Record::new(key.to_string(), core::DEFAULT_EXPIRY);
-    //     let res = r.log_to_particular_day("2021-08-06");
-
-    //     if res.is_err() {
-    //         println!(
-    //             "Error while trying to log to a particular day. Error: {}",
-    //             res.unwrap_err()
-    //         );
-    //     }
-    // }
-
-    // let val = Record::delete_all_records_from_the_deletions_and_itself("2021-07-11");
-
-    // if val.is_err() {
-    //     println!("Error while deleting records: {:?}", val.unwrap_err());
-    // }
-
-    // thread::sleep(Duration::from_secs(5));
-
-    // let cache_copy = &cache;
-
     scheduler.every(1.day()).at("2:00 am").run(|| {
         let val = Record::delete_all_records_from_the_deletions_and_itself(
+            // we do `-` before the Math to get the past file
             &Record::get_deletions_date_for_number_of_days(-(86_400 * 7)),
         );
-
-        if val.is_err() {
-            println!("Error while running a cron job to delete previous 7th day deletions file. Actual error: {}", val.unwrap_err());
-        }
+        handle_err!(
+            val,
+            "Error while running a cron job to delete previous 7th day deletions file!",
+            { return }
+        );
     });
 
     // scheduler
@@ -203,11 +158,9 @@ async fn rocket() -> _ {
     let thread_schedule_handle = scheduler.watch_thread(Duration::from_secs(1));
 
     let uid = UniqueID::new(1_606_208, 0.01, 4);
-    let cache_counter = CacheCounter::new();
     rocket::build()
         .mount("/", routes![index, upload, retrieve, custom_upload])
         .attach(uid)
-        .attach(cache_counter)
         .manage(thread_schedule_handle)
         .manage(cache)
         .manage(custom_config)

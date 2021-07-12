@@ -1,22 +1,28 @@
 extern crate bloom;
 
-use crate::loop_through_files_in_dir;
-use crate::util;
+use crate::core;
+use crate::{handle_err, loop_through_files_in_dir};
 use bloom::BloomFilter;
 use chrono::NaiveDate;
 use chrono::Utc;
 use rand::{self, Rng};
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::{Header, Method};
+use std::cell::RefCell;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const BASE62: &'static [u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 pub struct UniqueID {
-  bloom_instance: BloomFilter,
+  bloom_instance: RefCell<BloomFilter>,
   id_length: usize,
+  pub post_request_counter: AtomicUsize,
 }
+
+unsafe impl Sync for UniqueID {}
+
+const MAX_CACHE_KEYS_TO_RETAIN: usize = 500;
 
 impl UniqueID {
   pub fn new(expected_num_items: u32, false_positive_rate: f32, id_length: usize) -> UniqueID {
@@ -29,7 +35,7 @@ impl UniqueID {
 
       if parsed_date.le(&Utc::now().date().naive_local()) {
         // this takes care of deleting all pastes (recursively) and the file too
-        util::delete_pastes_from_deletions(&format!("deletions/{}.txt", filename));
+        core::Record::delete_all_records_from_the_deletions_and_itself(filename).unwrap();
       }
     });
 
@@ -40,8 +46,9 @@ impl UniqueID {
     }
 
     UniqueID {
-      bloom_instance: filter,
+      bloom_instance: RefCell::new(filter),
       id_length,
+      post_request_counter: AtomicUsize::new(1),
     }
   }
 
@@ -66,87 +73,45 @@ impl Fairing for UniqueID {
     }
   }
 
-  async fn on_liftoff(&self, _rocket: &rocket::Rocket<rocket::Orbit>) {
-    println!(
-      "Total bits in play: {} | Number of hashes in use: {}",
-      self.bloom_instance.num_bits(),
-      self.bloom_instance.num_hashes()
-    );
-  }
-
   async fn on_request(&self, req: &mut rocket::Request<'_>, _data: &mut rocket::Data<'_>) {
     if req.method() == Method::Post {
       let mut id;
       // looping through random ids until a non used unique id is found
       loop {
         id = self.generate_id();
-        if !self.bloom_instance.contains(&id) {
-          break;
-        }
-      }
 
-      let header = Header::new("unique-pastebin-id", id);
-      req.add_header(header);
-    }
-
-    if req.method() == Method::Get {
-      if let Some(r) = req.routed_segment(0) {
-        if r == "test" {
-          let id = req.routed_segment(1).unwrap_or("");
-          if id != "" {
-            if self.bloom_instance.contains(&id) {
-              println!("Found key ({})!", id);
-            } else {
-              println!("Key ({}) not found!", id);
-            }
+        unsafe {
+          if !(*self.bloom_instance.as_ptr()).contains(&id) {
+            break;
           }
         }
       }
-    }
-  }
-}
 
-pub struct CacheCounter(pub AtomicUsize);
+      let mut filter = self.bloom_instance.borrow_mut();
 
-const MAX_CACHE_KEYS_TO_RETAIN: usize = 500;
+      filter.insert(&id);
 
-impl CacheCounter {
-  pub fn new() -> Self {
-    CacheCounter(AtomicUsize::new(1))
-  }
-}
+      let header = Header::new("unique-pastebin-id", id);
+      req.add_header(header);
 
-#[rocket::async_trait]
-impl Fairing for CacheCounter {
-  fn info(&self) -> Info {
-    Info {
-      name: "Cache counter",
-      kind: Kind::Response,
+      if self.post_request_counter.load(Ordering::Relaxed) == MAX_CACHE_KEYS_TO_RETAIN {
+        req.add_header(Header::new("time-to-clear-expired-keys", "yes"));
+        let val = self
+          .post_request_counter
+          .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| Some(x * 0));
+        handle_err!(val, "error trying to reset the counter value to zero!", {});
+
+        // TODO: reset the bloom filter
+        self.bloom_instance.borrow_mut().clear();
+        loop_through_files_in_dir!("upload", filter);
+      }
     }
   }
 
   async fn on_response<'r>(&self, _req: &'r rocket::Request<'_>, _res: &mut rocket::Response<'r>) {
     // only on POST method, increment the CacheCounter value by 1.
     if _req.method() == Method::Post {
-      self.0.fetch_add(1, Ordering::Relaxed);
-    }
-  }
-
-  async fn on_request(&self, _req: &mut rocket::Request<'_>, _data: &mut rocket::Data<'_>) {
-    if _req.method() == Method::Post {
-      if self.0.load(Ordering::Relaxed) == MAX_CACHE_KEYS_TO_RETAIN {
-        _req.add_header(Header::new("time-to-clear-expired-keys", "yes"));
-        let val = self
-          .0
-          .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| Some(x * 0));
-
-        if val.is_err() {
-          println!(
-            "error trying to reset the counter value to zero. Actual error: {}",
-            val.unwrap_err()
-          );
-        }
-      }
+      self.post_request_counter.fetch_add(1, Ordering::Relaxed);
     }
   }
 }
