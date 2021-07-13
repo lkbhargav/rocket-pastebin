@@ -55,14 +55,6 @@ impl<'r> FromParam<'r> for TimeParam {
 
     let params = u32_params;
 
-    // let params = param
-    //   .split(&['d', 'm', 'h', 's'][..])
-    //   .filter(|v| v != &"")
-    //   .map(|v| v.parse::<u32>())
-    //   .filter(|v| v.is_ok())
-    //   .map(|v| v.unwrap())
-    //   .collect::<Vec<u32>>();
-
     let mut error_message = String::new();
 
     #[derive(Default, Debug)]
