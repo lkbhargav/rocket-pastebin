@@ -39,18 +39,20 @@ async fn abstracted_upload_functionality(
         return (Status::BadRequest, val.unwrap_err().to_string());
     }
 
+    let deletion_date = Record::get_deletions_date_for_number_of_days(
+        expiry_in_seconds as i64,
+    );
+
     cache
         .set(
             upload_request.id.clone(),
-            "".to_string(),
+            deletion_date.clone(),
             Some(Duration::from_secs(expiry_in_seconds)),
         )
         .await;
 
     let record = Record::new(upload_request.id, expiry_in_seconds);
-    let log_resp = record.log_to_particular_day(&Record::get_deletions_date_for_number_of_days(
-        expiry_in_seconds as i64,
-    ));
+    let log_resp = record.log_to_particular_day(&deletion_date);
 
     if log_resp.is_err() {
         return (
@@ -107,6 +109,30 @@ async fn retrieve(id: ID, cache: &State<Cache<String, String>>) -> (Status, Opti
     (Status::Ok, File::open(&filename).await.ok())
 }
 
+#[delete("/<id>")]
+async fn delete(
+cache: &State<Cache<String, String>>,
+id: ID,
+) -> (Status, String) {
+    let val = cache.get( &id.0).await;
+    if val.is_none() {
+        return (Status::NotFound, String::from("Key not found!"));
+    }     
+
+    cache.remove(&id.0).await;
+
+    let deletion_date = val.unwrap();
+
+    let deletion_resp = Record::delete_record_and_file(&id.0, &deletion_date);
+
+    handle_err!(deletion_resp, "Error while trying to delete record and file", {
+        return (Status::InternalServerError, String::from("Something went wrong while trying to delete!"))
+    }); 
+
+    (Status::Ok, String::from("Deleted!"))    
+}
+
+
 #[post("/<time>", data = "<paste>")]
 async fn custom_upload(
     time: TimeParam,
@@ -159,7 +185,7 @@ async fn rocket() -> _ {
 
     let uid = UniqueID::new(1_606_208, 0.01, 4);
     rocket::build()
-        .mount("/", routes![index, upload, retrieve, custom_upload])
+        .mount("/", routes![index, upload, delete, retrieve, custom_upload])
         .attach(uid)
         .manage(thread_schedule_handle)
         .manage(cache)
